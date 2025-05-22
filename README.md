@@ -1,6 +1,7 @@
 # Fan Control Extension for Framework Laptop
-> [!IMPORTANT]
-> **THIS IS A ROUGH BACKPORT TO GNOME 42 to support PopOS 22**
+> [!CAUTION]
+> **THIS IS A ROUGH BACKPORT TO GNOME 42 to support PopOS 22 \
+> Might have bugs that the "newer" version doesnt have**
 
 Gnome Shell extension to manage fw-fanctrl - Framework Laptop Fan Control
 
