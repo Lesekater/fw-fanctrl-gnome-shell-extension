@@ -16,17 +16,28 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-import GObject from 'gi://GObject';
-import St from 'gi://St';
-import Gio from 'gi://Gio';
-import GLib from 'gi://GLib';
+const GObject = imports.gi.GObject;
+const St = imports.gi.St;
+const Gio = imports.gi.Gio;
+const GLib = imports.gi.GLib;
 
-import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
-import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
-import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
+const ExtensionUtils = imports.misc.extensionUtils;
+const Me = ExtensionUtils.getCurrentExtension();
+const _ = imports.gettext.domain(Me.metadata['gettext-domain']).gettext;
 
-import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+const PanelMenu = imports.ui.panelMenu;
+const PopupMenu = imports.ui.popupMenu;
+const MessageTray = imports.ui.messageTray;
+const Main = imports.ui.main;
+
+// GNOME 42: Keine Extension-Klasse, stattdessen globale Variablen und enable/disable/init
+let _indicator = null;
+let _settings = null;
+let _sourceId = null;
+let currentMode = null;
+let foundCommand = true;
+let fanSpeed = 0;
+let refreshSeconds = 5;
 
 const MODES = [
     {
@@ -103,183 +114,165 @@ function execCommand(argv, input = null, cancellable = null) {
     });
 }
 
-export default class FrameworkFanControllerExtension extends Extension {
-    enable() {
-        this.currentMode = null;
-        this.foundCommand = true;
-        this.fanSpeed = 0;
+function init() {
+    // Keine Initialisierung nötig
+}
 
-        this._indicator = new Indicator();
-        Main.panel.addToStatusArea(this.uuid, this._indicator);
+function enable() {
+    currentMode = null;
+    foundCommand = true;
+    fanSpeed = 0;
 
-        // Refresh period
-        this._settings = this.getSettings();
-        this.refreshSeconds = this._settings.get_int('refresh-seconds');
+    _indicator = new Indicator();
+    Main.panel.addToStatusArea(Me.metadata.uuid, _indicator);
 
-        logError(`Refresh Seconds: ${this.refreshSeconds}`);
+    // Settings laden
+    _settings = ExtensionUtils.getSettings();
+    refreshSeconds = _settings.get_int('refresh-seconds');
 
-        const checkFanSpeed = async () => {
-            try {
-                let fanSpeed = await execCommand(['pkexec', 'ectool', 'pwmgetfanrpm']);
-                fanSpeed = fanSpeed.slice(0, -1);
-                fanSpeed = fanSpeed.split(' ');
-                return fanSpeed[3];
-            } catch (e) {
-                logError(e);
-            }
-            return false;
-        };
+    log(`Refresh Seconds: ${refreshSeconds}`);
 
-        const setFan = modeString => {
-            try {
-                Gio.Subprocess.new(['fw-fanctrl', modeString], Gio.SubprocessFlags.NONE);
-            } catch (e) {
-                logError(e);
-            }
-        };
-
-        const iconChange = () => {
-            if (!this.foundCommand) {
-                logError('fw-fanctrl is not installed');
-                sendNotification('Fan Speed not working', "You don't have fw-fanctrl installed!");
-                this._indicator.icon.icon_name = 'software-update-urgent-symbolic';
-                return false;
-            }
-
-            if (this.currentMode)
-                this._indicator.icon.icon_name = this.currentMode.icon;
-
-            return true;
-        };
-
-        const sendNotification = content => {
-            const systemSource = MessageTray.getSystemSource();
-            const notification = new MessageTray.Notification({
-                source: systemSource,
-                title: _('Framework Fan Control'),
-                body: _(content),
-                gicon: new Gio.ThemedIcon({name: 'emblem-generic'}),
-                iconName: 'emblem-generic',
-                urgency: MessageTray.Urgency.NORMAL,
-            });
-            systemSource.addNotification(notification);
-        };
-
-        const resetMenuItems = menuItems => {
-            for (const key in menuItems) {
-                if (Object.hasOwn(menuItems, key))
-                    menuItems[key].setOrnament(PopupMenu.Ornament.NONE);
-            }
-        };
-
-        const updateFanSpeed = () => {
-            this._indicator.menu.firstMenuItem.label.text = `Speed: ${this.fanSpeed} rpm.`;
-        };
-
-        const setMenu = () => {
-            this._indicator.menu.removeAll();
-
-            const fanSpeedItem = new PopupMenu.PopupImageMenuItem('loading...', 'weather-windy-symbolic', {});
-            fanSpeedItem.active = false;
-            this._indicator.menu.addMenuItem(fanSpeedItem);
-
-            const menuSeparator = new PopupMenu.PopupSeparatorMenuItem('Fan Mode');
-            this._indicator.menu.addMenuItem(menuSeparator);
-
-            for (const mode in MODES) {
-                if (Object.hasOwn(MODES, mode)) {
-                    const item = new PopupMenu.PopupMenuItem(_(`${MODES[mode].name}`));
-
-                    if (MODES[mode].mode === this.currentMode.mode)
-                        item.setOrnament(PopupMenu.Ornament.CHECK);
-                    else
-                        item.setOrnament(PopupMenu.Ornament.NONE);
-
-                    item.connect('activate', () => {
-                        this._indicator.menu.close();
-                        setFan(MODES[mode].mode);
-                        getFan();
-                        resetMenuItems(this._indicator.menu._getMenuItems());
-                        item.setOrnament(PopupMenu.Ornament.CHECK);
-                        sendNotification('Fan Speed Changed', `Fans set to ${MODES[mode].name} mode.`);
-                    });
-
-                    this._indicator.menu.addMenuItem(item);
-                }
-            }
-
-            // Open Settings
-            const openSettings = new PopupMenu.PopupMenuItem('Settings');
-            openSettings.connect('activate', () => {
-                this.openPreferences();
-            });
-
-            this._indicator.menu.addMenuItem(openSettings);
-        };
-
-        const getFan = async () => {
-            try {
-                let fanResult = await execCommand(['fw-fanctrl', '-q']);
-                fanResult = fanResult.slice(0, -1);
-                for (const i in MODES) {
-                    if (MODES[i].mode === fanResult) {
-                        this.foundCommand = true;
-                        this.currentMode = MODES[i];
-                        setMenu();
-                        iconChange();
-                    }
-                }
-            } catch (e) {
-                this.foundCommand = false;
-                logError(e);
-            }
-        };
-
-        // Check configuration and reset loop if change detected
-        const configChange = () => {
-            const newRefreshSeconds = this._settings.get_int('refresh-seconds');
-            if (newRefreshSeconds !== this.refreshSeconds) {
-                this.refreshSeconds = newRefreshSeconds;
-                startLoop();
-            }
-        };
-
-        // Run loop to get fan speed.
-        const startLoop = () => {
-            // Reset Loop.
-            this.stopLoop();
-
-            // Update Fan Speed based on configuration value
-            this._sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, this.refreshSeconds, () => {
-                checkFanSpeed()
-                    .then(fanSpeed => {
-                        this.fanSpeed = fanSpeed;
-                        updateFanSpeed();
-                    });
-
-                // Reset Loop if config has changed.
-                configChange();
-                return GLib.SOURCE_CONTINUE;
-            });
-        };
-
-        // Initialize.
-        getFan();
-        startLoop();
+    async function checkFanSpeed() {
+        try {
+            let fanSpeedResult = await execCommand(['pkexec', 'ectool', 'pwmgetfanrpm']);
+            fanSpeedResult = fanSpeedResult.slice(0, -1);
+            fanSpeedResult = fanSpeedResult.split(' ');
+            return fanSpeedResult[3];
+        } catch (e) {
+            logError(e);
+        }
+        return false;
     }
 
-    stopLoop() {
-        // Reset Loop if there is one
-        if (this._sourceId) {
-            GLib.Source.remove(this._sourceId);
-            this._sourceId = null;
+    function setFan(modeString) {
+        try {
+            Gio.Subprocess.new(['fw-fanctrl', modeString], Gio.SubprocessFlags.NONE);
+        } catch (e) {
+            logError(e);
         }
     }
 
-    disable() {
-        this.stopLoop();
-	this._settings = null;
-        this._indicator.destroy();
-        this._indicator = null;
+    function iconChange() {
+        if (!foundCommand) {
+            logError('fw-fanctrl is not installed');
+            sendNotification('Fan Speed not working', "You don't have fw-fanctrl installed!");
+            _indicator.icon.icon_name = 'software-update-urgent-symbolic';
+            return false;
+        }
+
+        if (currentMode)
+            _indicator.icon.icon_name = currentMode.icon;
+
+        return true;
+    }
+
+    function sendNotification(title, content) {
+        let source = new MessageTray.SystemNotificationSource();
+        Main.messageTray.add(source);
+        let notification = new MessageTray.Notification(source, title, content);
+        notification.setTransient(true);
+        source.notify(notification);
+    }
+
+    function resetMenuItems(menuItems) {
+        for (let i = 0; i < menuItems.length; i++) {
+            menuItems[i].setOrnament && menuItems[i].setOrnament(PopupMenu.Ornament.NONE);
+        }
+    }
+
+    function updateFanSpeed() {
+        if (_indicator.menu && _indicator.menu._getMenuItems().length > 0) {
+            let firstItem = _indicator.menu._getMenuItems()[0];
+            if (firstItem && firstItem.label)
+                firstItem.label.text = `Speed: ${fanSpeed} rpm.`;
+        }
+    }
+
+    function setMenu() {
+        _indicator.menu.removeAll();
+
+        let fanSpeedItem = new PopupMenu.PopupMenuItem('loading...');
+        fanSpeedItem.setSensitive(false);
+        _indicator.menu.addMenuItem(fanSpeedItem);
+
+        let menuSeparator = new PopupMenu.PopupSeparatorMenuItem();
+        _indicator.menu.addMenuItem(menuSeparator);
+
+        for (let i = 0; i < MODES.length; i++) {
+            let item = new PopupMenu.PopupMenuItem(_(`${MODES[i].name}`));
+            if (currentMode && MODES[i].mode === currentMode.mode) {
+                item.setOrnament && item.setOrnament(PopupMenu.Ornament.DOT);
+            }
+            item.connect('activate', () => {
+                setFan(MODES[i].mode);
+                currentMode = MODES[i];
+                iconChange();
+                setMenu();
+            });
+            _indicator.menu.addMenuItem(item);
+        }
+
+        // Open Settings
+        let openSettings = new PopupMenu.PopupMenuItem(_('Settings'));
+        openSettings.connect('activate', () => {
+            ExtensionUtils.openPrefs();
+        });
+        _indicator.menu.addMenuItem(openSettings);
+    }
+
+    async function getFan() {
+        try {
+            let fanResult = await execCommand(['fw-fanctrl', '-q']);
+            fanResult = fanResult.slice(0, -1);
+            for (let i = 0; i < MODES.length; i++) {
+                if (MODES[i].mode === fanResult) {
+                    currentMode = MODES[i];
+                    break;
+                }
+            }
+        } catch (e) {
+            foundCommand = false;
+            logError(e);
+        }
+    }
+
+    function configChange() {
+        let newRefreshSeconds = _settings.get_int('refresh-seconds');
+        if (newRefreshSeconds !== refreshSeconds) {
+            refreshSeconds = newRefreshSeconds;
+            startLoop();
+        }
+    }
+
+    function startLoop() {
+        stopLoop();
+        _sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, refreshSeconds, () => {
+            checkFanSpeed().then(speed => {
+                fanSpeed = speed;
+                updateFanSpeed();
+            });
+            configChange();
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    setMenu();
+    getFan();
+    startLoop();
+}
+
+function stopLoop() {
+    if (_sourceId) {
+        GLib.Source.remove(_sourceId);
+        _sourceId = null;
+    }
+}
+
+function disable() {
+    stopLoop();
+    _settings = null;
+    if (_indicator) {
+        _indicator.destroy();
+        _indicator = null;
     }
 }
